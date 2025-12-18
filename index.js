@@ -14,7 +14,8 @@ app.use(
   cors({
     origin: [
       "http://localhost:5173",
-      "https://local-chef-bazaar-5655a.web.app/",
+      "https://local-chef-bazaar-5655a.web.app",
+      "https://local-chef-bazar.netlify.app",
     ],
     credentials: true,
   })
@@ -164,6 +165,31 @@ async function run() {
       review.date = new Date().toISOString();
       const result = await reviewsCollection.insertOne(review);
       res.send(result);
+    });
+
+    // GET recent reviews for home page (latest 3-6)
+    app.get("/recent-reviews", async (req, res) => {
+      try {
+        const reviews = await reviewsCollection
+          .aggregate([
+            { $sort: { date: -1 } },
+            { $limit: 6 },
+            {
+              $lookup: {
+                from: "meals",
+                localField: "foodId",
+                foreignField: "_id",
+                as: "meal",
+              },
+            },
+            { $unwind: "$meal" },
+          ])
+          .toArray();
+
+        res.send(reviews);
+      } catch (err) {
+        res.status(500).send({ message: "Error fetching reviews" });
+      }
     });
 
     // POST favorite (protected)
