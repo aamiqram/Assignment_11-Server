@@ -77,6 +77,30 @@ async function run() {
       res.send(result);
     });
 
+    const mealsCollection = client.db("localchefbazaar").collection("meals");
+
+    // Get meals with pagination, limit, sort
+    app.get("/meals", async (req, res) => {
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 10;
+      const sort =
+        req.query.sort === "asc"
+          ? { price: 1 }
+          : req.query.sort === "desc"
+          ? { price: -1 }
+          : {};
+      const skip = (page - 1) * limit;
+
+      const result = await mealsCollection
+        .find()
+        .sort(sort)
+        .skip(skip)
+        .limit(limit)
+        .toArray();
+      const total = await mealsCollection.countDocuments();
+      res.send({ meals: result, total });
+    });
+
     app.get("/", (req, res) => res.send("Local Chef Bazaar Server Running!"));
 
     app.listen(port, () =>
