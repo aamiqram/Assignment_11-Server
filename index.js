@@ -258,6 +258,135 @@ async function run() {
       res.send(result);
     });
 
+    // GET all requests (admin only)
+    app.get("/requests", verifyToken, async (req, res) => {
+      // Add admin verification middleware later
+      const requests = await requestsCollection.find({}).toArray();
+      res.send(requests);
+    });
+
+    // PATCH approve/reject request (admin only)
+    app.patch("/requests/:id", verifyToken, async (req, res) => {
+      const { status } = req.body; // 'approved' or 'rejected'
+      const id = req.params.id;
+
+      const updateResult = await requestsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { requestStatus: status } }
+      );
+
+      if (status === "approved") {
+        const request = await requestsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (request.requestType === "chef") {
+          const chefId = `chef-${Math.floor(1000 + Math.random() * 9000)}`;
+          await usersCollection.updateOne(
+            { email: request.userEmail },
+            { $set: { role: "chef", chefId } }
+          );
+        } else if (request.requestType === "admin") {
+          await usersCollection.updateOne(
+            { email: request.userEmail },
+            { $set: { role: "admin" } }
+          );
+        }
+      }
+
+      res.send(updateResult);
+    });
+
+    // POST create meal (chef only)
+    app.post("/meals", verifyToken, async (req, res) => {
+      const meal = req.body;
+      meal.createdAt = new Date();
+      const result = await mealsCollection.insertOne(meal);
+      res.send(result);
+    });
+
+    // PUT update meal
+    app.put("/meals/:id", verifyToken, async (req, res) => {
+      const updatedMeal = req.body;
+      const result = await mealsCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: updatedMeal }
+      );
+      res.send(result);
+    });
+
+    // DELETE meal
+    app.delete("/meals/:id", verifyToken, async (req, res) => {
+      const result = await mealsCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+      });
+      res.send(result);
+    });
+
+    // GET orders for chef (by chefId)
+    app.get("/orders/chef/:chefId", verifyToken, async (req, res) => {
+      const orders = await ordersCollection
+        .find({ chefId: req.params.chefId })
+        .sort({ orderTime: -1 })
+        .toArray();
+      res.send(orders);
+    });
+
+    // PATCH update order status
+    app.patch("/orders/:id", verifyToken, async (req, res) => {
+      const { orderStatus } = req.body;
+      const result = await ordersCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { orderStatus } }
+      );
+      res.send(result);
+    });
+
+    // PATCH make user fraud
+    app.patch("/users/fraud/:email", verifyToken, async (req, res) => {
+      const result = await usersCollection.updateOne(
+        { email: req.params.email, role: { $ne: "admin" } },
+        { $set: { status: "fraud" } }
+      );
+      res.send(result);
+    });
+
+    // GET all users (admin)
+    app.get("/users", verifyToken, async (req, res) => {
+      const users = await usersCollection.find({}).toArray();
+      res.send(users);
+    });
+
+    // GET platform stats (admin)
+    app.get("/admin/stats", verifyToken, async (req, res) => {
+      const totalUsers = await usersCollection.countDocuments();
+      const totalOrders = await ordersCollection.countDocuments();
+      const pendingOrders = await ordersCollection.countDocuments({
+        orderStatus: { $ne: "delivered" },
+      });
+      const deliveredOrders = await ordersCollection.countDocuments({
+        orderStatus: "delivered",
+      });
+      const totalPaid = await ordersCollection
+        .aggregate([
+          { $match: { paymentStatus: "paid" } },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: { $multiply: ["$price", "$quantity"] } },
+            },
+          },
+        ])
+        .toArray();
+
+      res.send({
+        totalUsers,
+        totalOrders,
+        pendingOrders,
+        deliveredOrders,
+        totalPayment: totalPaid[0]?.total || 0,
+      });
+    });
+
     app.get("/", (req, res) => res.send("Local Chef Bazaar Server Running!"));
 
     app.listen(port, () =>
