@@ -304,6 +304,24 @@ async function run() {
       res.send(result);
     });
 
+    // GET single user by email (for CreateMeal, Profile, etc.)
+    app.get("/user/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+
+      try {
+        const user = await usersCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        res.send(user);
+      } catch (error) {
+        console.error("Error fetching user:", error);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
+
     // PUT update meal
     app.put("/meals/:id", verifyToken, async (req, res) => {
       const updatedMeal = req.body;
