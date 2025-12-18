@@ -1,8 +1,6 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const cookieParser = require("cookie-parser");
-const jwt = require("jsonwebtoken");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
 
@@ -10,14 +8,12 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 // Firebase Admin Initialization
-const firebaseConfig = {
-  projectId: process.env.FIREBASE_PROJECT_ID,
-  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-};
-
 admin.initializeApp({
-  credential: admin.credential.cert(firebaseConfig),
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+  }),
 });
 
 // Stripe Initialization (safe)
@@ -25,21 +21,10 @@ let stripe;
 if (process.env.STRIPE_SECRET_KEY) {
   stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 } else {
-  console.error("STRIPE_SECRET_KEY is missing!");
+  console.warn("STRIPE_SECRET_KEY missing — payments disabled");
 }
 
-// Dynamic Cookie Options
-const isProduction = process.env.NODE_ENV === "production";
-
-const cookieOptions = {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: "none",
-  path: "/",
-  maxAge: 30 * 24 * 60 * 60 * 1000,
-};
-
-// CORS Configuration
+// CORS - Allow your client origins
 app.use(
   cors({
     origin: ["http://localhost:5173", "https://local-chef-bazar.netlify.app"],
@@ -48,7 +33,6 @@ app.use(
 );
 
 app.use(express.json());
-app.use(cookieParser());
 
 // MongoDB Connection
 const uri = process.env.MONGO_URI;
@@ -76,84 +60,34 @@ async function run() {
       .db("localchefbazaar")
       .collection("requests");
 
-    // JWT Middleware
-    const verifyToken = (req, res, next) => {
-      const token = req.cookies?.token;
-      if (!token) return res.status(401).send({ message: "Unauthorized" });
+    // MIDDLEWARE: Verify Firebase ID Token from Authorization header
+    const verifyFirebaseToken = async (req, res, next) => {
+      const authHeader = req.headers.authorization;
 
-      jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-        if (err) return res.status(401).send({ message: "Invalid token" });
-        req.decoded = decoded;
-        next();
-      });
-    };
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).send({ message: "Unauthorized - No token" });
+      }
 
-    // Exchange Firebase token for JWT
-    app.post("/jwt", async (req, res) => {
-      const { idToken } = req.body;
-      if (!idToken) return res.status(400).send({ success: false });
+      const idToken = authHeader.split("Bearer ")[1];
 
       try {
         const decodedToken = await admin.auth().verifyIdToken(idToken);
-        const token = jwt.sign(
-          { email: decodedToken.email },
-          process.env.JWT_SECRET,
-          { expiresIn: "30d" }
-        );
-        res.cookie("token", token, cookieOptions);
-        res.send({ success: true });
+        req.user = { email: decodedToken.email };
+        next();
       } catch (error) {
-        console.error("Firebase token error:", error.message);
-        res.status(401).send({ success: false });
+        console.error("Invalid Firebase token:", error.message);
+        return res
+          .status(401)
+          .send({ message: "Unauthorized - Invalid token" });
       }
+    };
+
+    // PUBLIC ROUTES
+    app.get("/", (req, res) => {
+      res.send("LocalChefBazaar Server is running! 🚀");
     });
 
-    // Logout
-    app.post("/logout", (req, res) => {
-      res.clearCookie("token", {
-        httpOnly: true,
-        secure: true,
-        sameSite: "none",
-        path: "/",
-      });
-      res.send({ success: true });
-    });
-
-    // Sync or create user
-    app.put("/users", verifyToken, async (req, res) => {
-      const userData = req.body;
-      const result = await usersCollection.updateOne(
-        { email: userData.email },
-        {
-          $set: { ...userData, updatedAt: new Date() },
-          $setOnInsert: {
-            role: "user",
-            status: "active",
-            createdAt: new Date(),
-          },
-        },
-        { upsert: true }
-      );
-      const finalUser = await usersCollection.findOne({
-        email: userData.email,
-      });
-      res.send({ user: finalUser });
-    });
-
-    // Get user by email
-    app.get("/user/:email", verifyToken, async (req, res) => {
-      const user = await usersCollection.findOne({ email: req.params.email });
-      if (!user) return res.status(404).send({ message: "User not found" });
-      res.send(user);
-    });
-
-    // Get user role
-    app.get("/user/role/:email", verifyToken, async (req, res) => {
-      const user = await usersCollection.findOne({ email: req.params.email });
-      res.send({ role: user?.role || "user" });
-    });
-
-    // Meals endpoints
+    // Meals (public)
     app.get("/meals", async (req, res) => {
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 10;
@@ -182,35 +116,10 @@ async function run() {
       const meal = await mealsCollection.findOne({
         _id: new ObjectId(req.params.id),
       });
+      if (!meal) return res.status(404).send({ message: "Meal not found" });
       res.send(meal);
     });
 
-    // Create meal (chef only)
-    app.post("/meals", verifyToken, async (req, res) => {
-      const meal = req.body;
-      meal.createdAt = new Date();
-      const result = await mealsCollection.insertOne(meal);
-      res.send(result);
-    });
-
-    // Update meal
-    app.put("/meals/:id", verifyToken, async (req, res) => {
-      const result = await mealsCollection.updateOne(
-        { _id: new ObjectId(req.params.id) },
-        { $set: req.body }
-      );
-      res.send(result);
-    });
-
-    // Delete meal
-    app.delete("/meals/:id", verifyToken, async (req, res) => {
-      const result = await mealsCollection.deleteOne({
-        _id: new ObjectId(req.params.id),
-      });
-      res.send(result);
-    });
-
-    // Reviews
     app.get("/reviews/:foodId", async (req, res) => {
       const reviews = await reviewsCollection
         .find({ foodId: req.params.foodId })
@@ -219,16 +128,104 @@ async function run() {
       res.send(reviews);
     });
 
-    app.post("/reviews", verifyToken, async (req, res) => {
+    app.get("/recent-reviews", async (req, res) => {
+      const reviews = await reviewsCollection
+        .find({})
+        .sort({ date: -1 })
+        .limit(6)
+        .toArray();
+      res.send(reviews);
+    });
+
+    // PROTECTED ROUTES
+    // Sync or create user on first login
+    app.put("/users", verifyFirebaseToken, async (req, res) => {
+      const userData = req.body;
+      userData.email = req.user.email; // ensure email from token
+
+      const result = await usersCollection.updateOne(
+        { email: userData.email },
+        {
+          $set: { ...userData, updatedAt: new Date() },
+          $setOnInsert: {
+            role: "user",
+            status: "active",
+            createdAt: new Date(),
+          },
+        },
+        { upsert: true }
+      );
+
+      const finalUser = await usersCollection.findOne({
+        email: userData.email,
+      });
+      res.send({ user: finalUser });
+    });
+
+    // Get user by email
+    app.get("/user/:email", verifyFirebaseToken, async (req, res) => {
+      if (req.user.email !== req.params.email) {
+        return res.status(403).send({ message: "Forbidden" });
+      }
+      const user = await usersCollection.findOne({ email: req.params.email });
+      if (!user) return res.status(404).send({ message: "User not found" });
+      res.send(user);
+    });
+
+    // Get user role
+    app.get("/user/role/:email", verifyFirebaseToken, async (req, res) => {
+      if (req.user.email !== req.params.email) {
+        return res.status(403).send({ message: "Forbidden" });
+      }
+      const user = await usersCollection.findOne({ email: req.params.email });
+      res.send({ role: user?.role || "user" });
+    });
+
+    // Create meal (chef only)
+    app.post("/meals", verifyFirebaseToken, async (req, res) => {
+      const user = await usersCollection.findOne({ email: req.user.email });
+      if (user?.role !== "chef")
+        return res.status(403).send({ message: "Only chefs can create meals" });
+
+      const meal = req.body;
+      meal.chefId = user.chefId;
+      meal.userEmail = req.user.email;
+      meal.createdAt = new Date();
+
+      const result = await mealsCollection.insertOne(meal);
+      res.send(result);
+    });
+
+    // Update/Delete meal (chef only)
+    app.put("/meals/:id", verifyFirebaseToken, async (req, res) => {
+      const result = await mealsCollection.updateOne(
+        { _id: new ObjectId(req.params.id), userEmail: req.user.email },
+        { $set: req.body }
+      );
+      res.send(result);
+    });
+
+    app.delete("/meals/:id", verifyFirebaseToken, async (req, res) => {
+      const result = await mealsCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+        userEmail: req.user.email,
+      });
+      res.send(result);
+    });
+
+    // Reviews
+    app.post("/reviews", verifyFirebaseToken, async (req, res) => {
       const review = req.body;
+      review.reviewerEmail = req.user.email;
       review.date = new Date();
       const result = await reviewsCollection.insertOne(review);
       res.send(result);
     });
 
     // Favorites
-    app.post("/favorites", verifyToken, async (req, res) => {
+    app.post("/favorites", verifyFirebaseToken, async (req, res) => {
       const fav = req.body;
+      fav.userEmail = req.user.email;
       const exists = await favoritesCollection.findOne({
         userEmail: fav.userEmail,
         mealId: fav.mealId,
@@ -241,14 +238,16 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/favorites/:email", verifyToken, async (req, res) => {
+    app.get("/favorites/:email", verifyFirebaseToken, async (req, res) => {
+      if (req.user.email !== req.params.email)
+        return res.status(403).send({ message: "Forbidden" });
       const favorites = await favoritesCollection
         .find({ userEmail: req.params.email })
         .toArray();
       res.send(favorites);
     });
 
-    app.delete("/favorites/:id", verifyToken, async (req, res) => {
+    app.delete("/favorites/:id", verifyFirebaseToken, async (req, res) => {
       const result = await favoritesCollection.deleteOne({
         _id: new ObjectId(req.params.id),
       });
@@ -256,8 +255,9 @@ async function run() {
     });
 
     // Orders
-    app.post("/orders", verifyToken, async (req, res) => {
+    app.post("/orders", verifyFirebaseToken, async (req, res) => {
       const order = req.body;
+      order.userEmail = req.user.email;
       order.orderTime = new Date();
       order.orderStatus = "pending";
       order.paymentStatus = "Pending";
@@ -265,7 +265,9 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/orders/:email", verifyToken, async (req, res) => {
+    app.get("/orders/:email", verifyFirebaseToken, async (req, res) => {
+      if (req.user.email !== req.params.email)
+        return res.status(403).send({ message: "Forbidden" });
       const orders = await ordersCollection
         .find({ userEmail: req.params.email })
         .sort({ orderTime: -1 })
@@ -273,7 +275,7 @@ async function run() {
       res.send(orders);
     });
 
-    app.get("/orders/chef/:chefId", verifyToken, async (req, res) => {
+    app.get("/orders/chef/:chefId", verifyFirebaseToken, async (req, res) => {
       const orders = await ordersCollection
         .find({ chefId: req.params.chefId })
         .sort({ orderTime: -1 })
@@ -281,7 +283,7 @@ async function run() {
       res.send(orders);
     });
 
-    app.patch("/orders/:id", verifyToken, async (req, res) => {
+    app.patch("/orders/:id", verifyFirebaseToken, async (req, res) => {
       const { orderStatus } = req.body;
       const result = await ordersCollection.updateOne(
         { _id: new ObjectId(req.params.id) },
@@ -290,7 +292,7 @@ async function run() {
       res.send(result);
     });
 
-    app.patch("/orders/:id/pay", verifyToken, async (req, res) => {
+    app.patch("/orders/:id/pay", verifyFirebaseToken, async (req, res) => {
       const result = await ordersCollection.updateOne(
         { _id: new ObjectId(req.params.id) },
         { $set: { paymentStatus: "paid" } }
@@ -298,18 +300,29 @@ async function run() {
       res.send(result);
     });
 
-    // Requests (Be a Chef/Admin)
-    app.post("/requests", verifyToken, async (req, res) => {
-      const result = await requestsCollection.insertOne(req.body);
+    // Requests
+    app.post("/requests", verifyFirebaseToken, async (req, res) => {
+      const request = req.body;
+      request.userEmail = req.user.email;
+      request.requestTime = new Date();
+      request.requestStatus = "pending";
+      const result = await requestsCollection.insertOne(request);
       res.send(result);
     });
 
-    app.get("/requests", verifyToken, async (req, res) => {
+    app.get("/requests", verifyFirebaseToken, async (req, res) => {
+      const user = await usersCollection.findOne({ email: req.user.email });
+      if (user?.role !== "admin")
+        return res.status(403).send({ message: "Admin only" });
       const requests = await requestsCollection.find({}).toArray();
       res.send(requests);
     });
 
-    app.patch("/requests/:id", verifyToken, async (req, res) => {
+    app.patch("/requests/:id", verifyFirebaseToken, async (req, res) => {
+      const user = await usersCollection.findOne({ email: req.user.email });
+      if (user?.role !== "admin")
+        return res.status(403).send({ message: "Admin only" });
+
       const { status } = req.body;
       const id = req.params.id;
 
@@ -340,11 +353,15 @@ async function run() {
     });
 
     // Admin Stats
-    app.get("/admin/stats", verifyToken, async (req, res) => {
+    app.get("/admin/stats", verifyFirebaseToken, async (req, res) => {
+      const user = await usersCollection.findOne({ email: req.user.email });
+      if (user?.role !== "admin")
+        return res.status(403).send({ message: "Admin only" });
+
       const totalUsers = await usersCollection.countDocuments();
       const totalOrders = await ordersCollection.countDocuments();
       const pendingOrders = await ordersCollection.countDocuments({
-        orderStatus: { $nin: ["delivered", "cancelled"] },
+        orderStatus: "pending",
       });
       const deliveredOrders = await ordersCollection.countDocuments({
         orderStatus: "delivered",
@@ -371,33 +388,33 @@ async function run() {
     });
 
     // Stripe Payment Intent
-    app.post("/create-payment-intent", verifyToken, async (req, res) => {
-      const { totalAmount } = req.body;
-      if (!stripe)
-        return res.status(500).send({ error: "Stripe not configured" });
+    app.post(
+      "/create-payment-intent",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const { totalAmount } = req.body;
+        if (!stripe)
+          return res.status(500).send({ error: "Stripe not configured" });
 
-      try {
-        const paymentIntent = await stripe.paymentIntents.create({
-          amount: totalAmount,
-          currency: "usd",
-          payment_method_types: ["card"],
-        });
-        res.send({ clientSecret: paymentIntent.client_secret });
-      } catch (err) {
-        res.status(500).send({ error: err.message });
+        try {
+          const paymentIntent = await stripe.paymentIntents.create({
+            amount: totalAmount,
+            currency: "usd",
+            payment_method_types: ["card"],
+          });
+          res.send({ clientSecret: paymentIntent.client_secret });
+        } catch (err) {
+          res.status(500).send({ error: err.message });
+        }
       }
-    });
-
-    // Root route
-    app.get("/", (req, res) => {
-      res.send("LocalChefBazaar Server is running!");
-    });
+    );
 
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
+      console.log(`Local: http://localhost:${port}`);
     });
   } catch (err) {
-    console.error("MongoDB connection error:", err);
+    console.error("Server error:", err);
   }
 }
 
