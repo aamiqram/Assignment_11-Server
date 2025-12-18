@@ -1,46 +1,90 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-require("dotenv").config();
+const cookieParser = require("cookie-parser");
+const jwt = require("jsonwebtoken");
+const admin = require("firebase-admin");
+const { MongoClient, ServerApiVersion } = require("mongodb");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const port = process.env.PORT || 5000;
 
-app.use(cors());
+// Middleware
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "https://local-chef-bazaar-5655a.web.app/",
+    ],
+    credentials: true,
+  })
+);
 app.use(express.json());
+app.use(cookieParser());
 
-const { MongoClient, ServerApiVersion } = require("mongodb");
-const uri =
-  "mongodb+srv://local_chef_bazaar-Server:U8WTlb2gkubM1E6i@cluster0.koevyfe.mongodb.net/?appName=Cluster0";
+// Firebase Admin Initialization
+admin.initializeApp({
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+  }),
+});
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
+// MongoDB Connection
+const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
+  serverApi: { version: ServerApiVersion.v1 },
 });
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
-    //await client.connect();
-    // Send a ping to confirm a successful connection
-    //await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
+    await client.connect();
+    const usersCollection = client.db("localchefbazaar").collection("users");
+
+    // JWT Endpoint
+    app.post("/jwt", async (req, res) => {
+      const { idToken } = req.body;
+      try {
+        const decoded = await admin.auth().verifyIdToken(idToken);
+        const token = jwt.sign(
+          { email: decoded.email },
+          process.env.JWT_SECRET,
+          { expiresIn: "7d" }
+        );
+        res.cookie("token", token, {
+          httpOnly: true,
+          secure: true,
+          sameSite: "none",
+        });
+        res.send({ success: true });
+      } catch (err) {
+        res.status(401).send({ success: false });
+      }
+    });
+
+    // Save or Update User
+    app.post("/users", async (req, res) => {
+      const user = req.body;
+      const query = { email: user.email };
+      const existing = await usersCollection.findOne(query);
+      if (existing) return res.send({ message: "User exists" });
+      const result = await usersCollection.insertOne({
+        ...user,
+        role: "user",
+        status: "active",
+      });
+      res.send(result);
+    });
+
+    app.get("/", (req, res) => res.send("Local Chef Bazaar Server Running!"));
+
+    app.listen(port, () =>
+      console.log(`Server running on port http://localhost:${port}`)
     );
-  } finally {
-    // Ensures that the client will close when you finish/error
-    //await client.close();
+  } catch (err) {
+    console.error(err);
   }
 }
+
 run().catch(console.dir);
-
-app.get("/", (req, res) => {
-  res.send("Welcome to Local_Chef_Bazaar Server!");
-});
-
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
