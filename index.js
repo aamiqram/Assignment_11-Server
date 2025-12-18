@@ -405,6 +405,34 @@ async function run() {
       });
     });
 
+    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+
+    app.post("/create-payment-intent", verifyToken, async (req, res) => {
+      const { totalAmount } = req.body;
+
+      try {
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: totalAmount,
+          currency: "usd",
+          payment_method_types: ["card"],
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (err) {
+        res.status(500).send({ error: err.message });
+      }
+    });
+
+    app.patch("/orders/:id/pay", verifyToken, async (req, res) => {
+      await ordersCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { paymentStatus: "paid" } }
+      );
+      res.send({ success: true });
+    });
+
     app.get("/", (req, res) => res.send("Local Chef Bazaar Server Running!"));
 
     app.listen(port, () =>
