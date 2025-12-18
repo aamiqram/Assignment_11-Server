@@ -213,6 +213,17 @@ async function run() {
       res.send({ role: user?.role || "user" });
     });
 
+    const requestsCollection = client
+      .db("localchefbazaar")
+      .collection("requests");
+
+    // POST request to become chef/admin
+    app.post("/requests", verifyToken, async (req, res) => {
+      const request = req.body;
+      const result = await requestsCollection.insertOne(request);
+      res.send(result);
+    });
+
     app.get("/", (req, res) => res.send("Local Chef Bazaar Server Running!"));
 
     app.listen(port, () =>
