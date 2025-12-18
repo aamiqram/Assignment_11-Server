@@ -187,6 +187,40 @@ async function run() {
       res.send(favorites);
     });
 
+    // GET user's reviews
+    app.get("/reviews/user/:email", verifyToken, async (req, res) => {
+      const reviews = await reviewsCollection
+        .find({ reviewerEmail: req.params.email })
+        .toArray();
+      res.send(reviews);
+    });
+
+    // DELETE review
+    app.delete("/reviews/:id", verifyToken, async (req, res) => {
+      const result = await reviewsCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+      });
+      res.send(result);
+    });
+
+    // PUT update review
+    app.put("/reviews/:id", verifyToken, async (req, res) => {
+      const { rating, comment } = req.body;
+      const result = await reviewsCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { rating, comment } }
+      );
+      res.send(result);
+    });
+
+    // DELETE favorite
+    app.delete("/favorites/:id", verifyToken, async (req, res) => {
+      const result = await favoritesCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+      });
+      res.send(result);
+    });
+
     const ordersCollection = client.db("localchefbazaar").collection("orders");
 
     // POST order (protected)
