@@ -34,7 +34,7 @@ const isProduction = process.env.NODE_ENV === "production";
 const cookieOptions = {
   httpOnly: true,
   secure: isProduction,
-  sameSite: isProduction ? "none" : "lax",
+  sameSite: "none",
   path: "/",
   maxAge: 30 * 24 * 60 * 60 * 1000,
 };
@@ -98,7 +98,7 @@ async function run() {
         const token = jwt.sign(
           { email: decodedToken.email },
           process.env.JWT_SECRET,
-          { expiresIn: "7d" }
+          { expiresIn: "30d" }
         );
         res.cookie("token", token, cookieOptions);
         res.send({ success: true });
@@ -110,7 +110,12 @@ async function run() {
 
     // Logout
     app.post("/logout", (req, res) => {
-      res.clearCookie("token", cookieOptions);
+      res.clearCookie("token", {
+        httpOnly: true,
+        secure: true,
+        sameSite: "none",
+        path: "/",
+      });
       res.send({ success: true });
     });
 
