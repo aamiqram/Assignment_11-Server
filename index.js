@@ -45,21 +45,39 @@ async function run() {
     // JWT Endpoint
     app.post("/jwt", async (req, res) => {
       const { idToken } = req.body;
+
+      if (!idToken) {
+        return res
+          .status(400)
+          .send({ success: false, message: "No token provided" });
+      }
+
       try {
-        const decoded = await admin.auth().verifyIdToken(idToken);
-        const token = jwt.sign(
-          { email: decoded.email },
-          process.env.JWT_SECRET,
-          { expiresIn: "7d" }
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        console.log(
+          "Firebase token verified successfully:",
+          decodedToken.email
         );
+
+        const token = jwt.sign(
+          { email: decodedToken.email, uid: decodedToken.uid },
+          process.env.JWT_SECRET,
+          { expiresIn: "30d" }
+        );
+
         res.cookie("token", token, {
           httpOnly: true,
-          secure: true,
-          sameSite: "none",
+          secure: false, // set true only in production (HTTPS)
+          sameSite: "lax",
+          maxAge: 7 * 24 * 60 * 60 * 1000,
         });
+
         res.send({ success: true });
-      } catch (err) {
-        res.status(401).send({ success: false });
+      } catch (error) {
+        console.error("Firebase token verification failed:", error.message);
+        res
+          .status(401)
+          .send({ success: false, message: "Invalid Firebase token" });
       }
     });
 
@@ -188,6 +206,11 @@ async function run() {
         .sort({ orderTime: -1 })
         .toArray();
       res.send(orders);
+    });
+
+    app.get("/user/role/:email", verifyToken, async (req, res) => {
+      const user = await usersCollection.findOne({ email: req.params.email });
+      res.send({ role: user?.role || "user" });
     });
 
     app.get("/", (req, res) => res.send("Local Chef Bazaar Server Running!"));
