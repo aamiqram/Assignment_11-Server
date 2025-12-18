@@ -78,27 +78,95 @@ async function run() {
     });
 
     const mealsCollection = client.db("localchefbazaar").collection("meals");
+    const reviewsCollection = client
+      .db("localchefbazaar")
+      .collection("reviews");
+    const favoritesCollection = client
+      .db("localchefbazaar")
+      .collection("favorites");
 
-    // Get meals with pagination, limit, sort
+    // Verify JWT Middleware
+    const verifyToken = (req, res, next) => {
+      const token = req.cookies?.token;
+      if (!token) return res.status(401).send({ message: "Unauthorized" });
+      jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+        if (err) return res.status(401).send({ message: "Unauthorized" });
+        req.decoded = decoded;
+        next();
+      });
+    };
+
+    // GET meals with search, sort, pagination
     app.get("/meals", async (req, res) => {
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 10;
-      const sort =
-        req.query.sort === "asc"
-          ? { price: 1 }
-          : req.query.sort === "desc"
-          ? { price: -1 }
-          : {};
-      const skip = (page - 1) * limit;
+      const search = req.query.search || "";
+      const sort = req.query.sort; // 'asc', 'desc'
+
+      let query = {};
+      if (search) {
+        query.foodName = { $regex: search, $options: "i" };
+      }
+
+      let sortObj = {};
+      if (sort === "asc") sortObj.price = 1;
+      if (sort === "desc") sortObj.price = -1;
 
       const result = await mealsCollection
-        .find()
-        .sort(sort)
-        .skip(skip)
+        .find(query)
+        .sort(sortObj)
+        .skip((page - 1) * limit)
         .limit(limit)
         .toArray();
-      const total = await mealsCollection.countDocuments();
+
+      const total = await mealsCollection.countDocuments(query);
       res.send({ meals: result, total });
+    });
+
+    // GET single meal
+    app.get("/meal/:id", async (req, res) => {
+      const meal = await mealsCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
+      res.send(meal);
+    });
+
+    // GET reviews for a meal
+    app.get("/reviews/:foodId", async (req, res) => {
+      const reviews = await reviewsCollection
+        .find({ foodId: req.params.foodId })
+        .sort({ date: -1 })
+        .toArray();
+      res.send(reviews);
+    });
+
+    // POST review (protected)
+    app.post("/reviews", verifyToken, async (req, res) => {
+      const review = req.body;
+      review.date = new Date().toISOString();
+      const result = await reviewsCollection.insertOne(review);
+      res.send(result);
+    });
+
+    // POST favorite (protected)
+    app.post("/favorites", verifyToken, async (req, res) => {
+      const fav = req.body;
+      const query = { userEmail: fav.userEmail, mealId: fav.mealId };
+      const exists = await favoritesCollection.findOne(query);
+      if (exists) return res.send({ message: "Already favorited" });
+      const result = await favoritesCollection.insertOne({
+        ...fav,
+        addedTime: new Date().toISOString(),
+      });
+      res.send(result);
+    });
+
+    // GET user favorites
+    app.get("/favorites/:email", verifyToken, async (req, res) => {
+      const favorites = await favoritesCollection
+        .find({ userEmail: req.params.email })
+        .toArray();
+      res.send(favorites);
     });
 
     app.get("/", (req, res) => res.send("Local Chef Bazaar Server Running!"));
