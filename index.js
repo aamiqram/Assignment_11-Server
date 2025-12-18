@@ -169,6 +169,27 @@ async function run() {
       res.send(favorites);
     });
 
+    const ordersCollection = client.db("localchefbazaar").collection("orders");
+
+    // POST order (protected)
+    app.post("/orders", verifyToken, async (req, res) => {
+      const order = req.body;
+      order.orderTime = new Date().toISOString();
+      order.orderStatus = "pending";
+      order.paymentStatus = "Pending";
+      const result = await ordersCollection.insertOne(order);
+      res.send(result);
+    });
+
+    // GET my orders
+    app.get("/orders/:email", verifyToken, async (req, res) => {
+      const orders = await ordersCollection
+        .find({ userEmail: req.params.email })
+        .sort({ orderTime: -1 })
+        .toArray();
+      res.send(orders);
+    });
+
     app.get("/", (req, res) => res.send("Local Chef Bazaar Server Running!"));
 
     app.listen(port, () =>
