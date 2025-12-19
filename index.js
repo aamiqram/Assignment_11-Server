@@ -93,10 +93,10 @@ async function run() {
       const limit = parseInt(req.query.limit) || 10;
       const search = req.query.search || "";
       const sort = req.query.sort;
-
+      const chefEmail = req.query.chefEmail;
       let query = {};
       if (search) query.foodName = { $regex: search, $options: "i" };
-
+      if (chefEmail) query.userEmail = chefEmail;
       let sortObj = {};
       if (sort === "asc") sortObj.price = 1;
       if (sort === "desc") sortObj.price = -1;
@@ -408,6 +408,96 @@ async function run() {
         }
       }
     );
+
+    // GET reviews by user email (for My Reviews page)
+    app.get("/reviews/user/:email", verifyFirebaseToken, async (req, res) => {
+      if (req.user.email !== req.params.email) {
+        return res.status(403).send({ message: "Forbidden" });
+      }
+
+      const reviews = await reviewsCollection
+        .find({ reviewerEmail: req.params.email })
+        .sort({ date: -1 })
+        .toArray();
+
+      res.send(reviews);
+    });
+
+    // DELETE review by ID
+    app.delete("/reviews/:id", verifyFirebaseToken, async (req, res) => {
+      const review = await reviewsCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
+      if (!review) return res.status(404).send({ message: "Review not found" });
+      if (review.reviewerEmail !== req.user.email) {
+        return res
+          .status(403)
+          .send({ message: "You can only delete your own reviews" });
+      }
+
+      const result = await reviewsCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+      });
+      res.send(result);
+    });
+
+    // UPDATE review by ID
+    app.put("/reviews/:id", verifyFirebaseToken, async (req, res) => {
+      const { rating, comment } = req.body;
+      const review = await reviewsCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
+      if (!review) return res.status(404).send({ message: "Review not found" });
+      if (review.reviewerEmail !== req.user.email) {
+        return res
+          .status(403)
+          .send({ message: "You can only update your own reviews" });
+      }
+
+      const result = await reviewsCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { rating, comment, date: new Date() } }
+      );
+
+      res.send(result);
+    });
+
+    // GET all users (Admin only)
+    app.get("/users", verifyFirebaseToken, async (req, res) => {
+      const requester = await usersCollection.findOne({
+        email: req.user.email,
+      });
+      if (requester?.role !== "admin") {
+        return res.status(403).send({ message: "Admin access required" });
+      }
+
+      const users = await usersCollection.find({}).toArray();
+      res.send(users);
+    });
+
+    // Mark user as fraud (Admin only)
+    app.patch("/users/fraud/:email", verifyFirebaseToken, async (req, res) => {
+      const requester = await usersCollection.findOne({
+        email: req.user.email,
+      });
+      if (requester?.role !== "admin") {
+        return res.status(403).send({ message: "Admin access required" });
+      }
+
+      const email = req.params.email;
+      const targetUser = await usersCollection.findOne({ email });
+      if (!targetUser)
+        return res.status(404).send({ message: "User not found" });
+      if (targetUser.role === "admin")
+        return res.status(400).send({ message: "Cannot mark admin as fraud" });
+
+      const result = await usersCollection.updateOne(
+        { email },
+        { $set: { status: "fraud" } }
+      );
+
+      res.send(result);
+    });
 
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
