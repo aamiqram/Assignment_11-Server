@@ -27,7 +27,11 @@ if (process.env.STRIPE_SECRET_KEY) {
 // CORS - Allow your client origins
 app.use(
   cors({
-    origin: ["http://localhost:5173", "https://local-chef-bazar.netlify.app"],
+    origin: [
+      "http://localhost:5173",
+      "https://local-chef-bazar.netlify.app",
+      "http://localhost:5174",
+    ],
     credentials: true,
   })
 );
@@ -233,6 +237,7 @@ async function run() {
       if (exists) return res.send({ message: "Already favorited" });
       const result = await favoritesCollection.insertOne({
         ...fav,
+        mealImage: fav.mealImage || "https://i.ibb.co.com/placeholder.jpg",
         addedTime: new Date(),
       });
       res.send(result);
@@ -306,6 +311,11 @@ async function run() {
       request.userEmail = req.user.email;
       request.requestTime = new Date();
       request.requestStatus = "pending";
+      const user = await usersCollection.findOne({ email: req.user.email });
+      if (user) {
+        request.image =
+          user.imageURL || "https://i.ibb.co.com/0s3pdnc/avatar.png";
+      }
       const result = await requestsCollection.insertOne(request);
       res.send(result);
     });
