@@ -31,6 +31,7 @@ app.use(
       "http://localhost:5173",
       "https://local-chef-bazar.netlify.app",
       "http://localhost:5174",
+      
     ],
     credentials: true,
   })
@@ -507,6 +508,171 @@ async function run() {
       );
 
       res.send(result);
+    });
+
+    // Filter meals by multiple criteria
+    app.get("/meals/filter", async (req, res) => {
+      const {
+        category,
+        minPrice,
+        maxPrice,
+        rating,
+        chefId,
+        page = 1,
+        limit = 10,
+      } = req.query;
+
+      let query = {};
+
+      if (category && category !== "all") {
+        query.category = category;
+      }
+
+      if (minPrice || maxPrice) {
+        query.price = {};
+        if (minPrice) query.price.$gte = parseFloat(minPrice);
+        if (maxPrice) query.price.$lte = parseFloat(maxPrice);
+      }
+
+      if (rating) {
+        query.rating = { $gte: parseFloat(rating) };
+      }
+
+      if (chefId) {
+        query.chefId = chefId;
+      }
+
+      const meals = await mealsCollection
+        .find(query)
+        .skip((page - 1) * limit)
+        .limit(parseInt(limit))
+        .toArray();
+
+      const total = await mealsCollection.countDocuments(query);
+
+      res.send({ meals, total, page: parseInt(page), limit: parseInt(limit) });
+    });
+
+    // Home page statistics
+    app.get("/stats/home", async (req, res) => {
+      const totalMeals = await mealsCollection.countDocuments();
+      const totalChefs = await usersCollection.countDocuments({ role: "chef" });
+      const totalOrders = await ordersCollection.countDocuments();
+
+      // Get top-rated meals (4+ stars)
+      const topRatedMeals = await mealsCollection
+        .find({ rating: { $gte: 4 } })
+        .limit(6)
+        .toArray();
+
+      // Calculate total revenue from paid orders
+      const revenueAggregate = await ordersCollection
+        .aggregate([
+          { $match: { paymentStatus: "paid" } },
+          {
+            $group: {
+              _id: null,
+              totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
+            },
+          },
+        ])
+        .toArray();
+
+      res.send({
+        totalMeals,
+        totalChefs,
+        totalOrders,
+        totalRevenue: revenueAggregate[0]?.totalRevenue || 0,
+        topRatedMeals,
+      });
+    });
+
+    // Featured chefs (chefs with 4+ rating and at least 5 meals)
+    app.get("/chefs/featured", async (req, res) => {
+      const chefs = await usersCollection.find({ role: "chef" }).toArray();
+
+      // Get chef statistics
+      const chefStats = await Promise.all(
+        chefs.map(async (chef) => {
+          const mealCount = await mealsCollection.countDocuments({
+            userEmail: chef.email,
+          });
+
+          // Calculate average rating from meals
+          const mealRatings = await mealsCollection
+            .find({ userEmail: chef.email, rating: { $exists: true } })
+            .toArray();
+
+          const avgRating =
+            mealRatings.length > 0
+              ? mealRatings.reduce((sum, meal) => sum + (meal.rating || 0), 0) /
+                mealRatings.length
+              : 0;
+
+          return {
+            ...chef,
+            mealCount,
+            avgRating: parseFloat(avgRating.toFixed(1)),
+          };
+        })
+      );
+
+      // Filter featured chefs (4+ rating and at least 5 meals)
+      const featuredChefs = chefStats
+        .filter((chef) => chef.avgRating >= 4 && chef.mealCount >= 5)
+        .sort((a, b) => b.avgRating - a.avgRating)
+        .slice(0, 8); // Limit to 8 featured chefs
+
+      res.send(featuredChefs);
+    });
+
+    // Get meals by chef ID (for related meals)
+    app.get("/meals/chef/:chefId", async (req, res) => {
+      const { chefId } = req.params;
+      const { excludeId, limit = 4 } = req.query;
+
+      let query = { chefId };
+
+      if (excludeId) {
+        query._id = { $ne: new ObjectId(excludeId) };
+      }
+
+      const meals = await mealsCollection
+        .find(query)
+        .limit(parseInt(limit))
+        .toArray();
+
+      res.send(meals);
+    });
+
+    // Get chef details by ID
+    app.get("/chef/:chefId", async (req, res) => {
+      const chef = await usersCollection.findOne({
+        chefId: req.params.chefId,
+        role: "chef",
+      });
+
+      if (!chef) {
+        return res.status(404).send({ message: "Chef not found" });
+      }
+
+      const meals = await mealsCollection
+        .find({ userEmail: chef.email })
+        .toArray();
+
+      const stats = {
+        totalMeals: meals.length,
+        avgRating:
+          meals.length > 0
+            ? meals.reduce((sum, meal) => sum + (meal.rating || 0), 0) /
+              meals.length
+            : 0,
+        totalOrders: await ordersCollection.countDocuments({
+          chefId: chef.chefId,
+        }),
+      };
+
+      res.send({ chef, meals, stats });
     });
 
     app.listen(port, () => {
