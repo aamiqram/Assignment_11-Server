@@ -31,9 +31,10 @@ app.use(
       "http://localhost:5173",
       "https://local-chef-bazar.netlify.app",
       "http://localhost:5174",
+      "https://local-chef-bazar.vercel.app",
     ],
     credentials: true,
-  })
+  }),
 );
 
 app.use(express.json());
@@ -157,7 +158,7 @@ async function run() {
             createdAt: new Date(),
           },
         },
-        { upsert: true }
+        { upsert: true },
       );
 
       const finalUser = await usersCollection.findOne({
@@ -182,6 +183,18 @@ async function run() {
         return res.status(403).send({ message: "Forbidden" });
       }
       const user = await usersCollection.findOne({ email: req.params.email });
+
+      // Allow demo role override via header for demo accounts
+      const demoRole = req.headers["x-demo-role"];
+      if (demoRole && user?.email) {
+        // For demo accounts, allow role switching
+        const isDemo =
+          user.email.includes("demo") || user.email.includes("localchefbazaar");
+        if (isDemo && ["user", "chef", "admin"].includes(demoRole)) {
+          return res.send({ role: demoRole });
+        }
+      }
+
       res.send({ role: user?.role || "user" });
     });
 
@@ -204,7 +217,7 @@ async function run() {
     app.put("/meals/:id", verifyFirebaseToken, async (req, res) => {
       const result = await mealsCollection.updateOne(
         { _id: new ObjectId(req.params.id), userEmail: req.user.email },
-        { $set: req.body }
+        { $set: req.body },
       );
       res.send(result);
     });
@@ -292,7 +305,7 @@ async function run() {
       const { orderStatus } = req.body;
       const result = await ordersCollection.updateOne(
         { _id: new ObjectId(req.params.id) },
-        { $set: { orderStatus } }
+        { $set: { orderStatus } },
       );
       res.send(result);
     });
@@ -300,7 +313,7 @@ async function run() {
     app.patch("/orders/:id/pay", verifyFirebaseToken, async (req, res) => {
       const result = await ordersCollection.updateOne(
         { _id: new ObjectId(req.params.id) },
-        { $set: { paymentStatus: "paid" } }
+        { $set: { paymentStatus: "paid" } },
       );
       res.send(result);
     });
@@ -338,7 +351,7 @@ async function run() {
 
       const updateResult = await requestsCollection.updateOne(
         { _id: new ObjectId(id) },
-        { $set: { requestStatus: status } }
+        { $set: { requestStatus: status } },
       );
 
       if (status === "approved") {
@@ -349,12 +362,12 @@ async function run() {
           const chefId = `chef-${Math.floor(1000 + Math.random() * 9000)}`;
           await usersCollection.updateOne(
             { email: request.userEmail },
-            { $set: { role: "chef", chefId } }
+            { $set: { role: "chef", chefId } },
           );
         } else if (request.requestType === "admin") {
           await usersCollection.updateOne(
             { email: request.userEmail },
-            { $set: { role: "admin" } }
+            { $set: { role: "admin" } },
           );
         }
       }
@@ -369,12 +382,19 @@ async function run() {
         return res.status(403).send({ message: "Admin only" });
 
       const totalUsers = await usersCollection.countDocuments();
+      const totalMeals = await mealsCollection.countDocuments();
       const totalOrders = await ordersCollection.countDocuments();
       const pendingOrders = await ordersCollection.countDocuments({
         orderStatus: "pending",
       });
       const deliveredOrders = await ordersCollection.countDocuments({
         orderStatus: "delivered",
+      });
+      const newUsersToday = await usersCollection.countDocuments({
+        createdAt: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) },
+      });
+      const ordersToday = await ordersCollection.countDocuments({
+        orderTime: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) },
       });
       const paidAggregate = await ordersCollection
         .aggregate([
@@ -390,10 +410,135 @@ async function run() {
 
       res.send({
         totalUsers,
+        totalMeals,
         totalOrders,
         pendingOrders,
         deliveredOrders,
-        totalPayment: paidAggregate[0]?.total || 0,
+        newUsersToday,
+        ordersToday,
+        totalRevenue: paidAggregate[0]?.total || 0,
+      });
+    });
+
+    // Chef Stats
+    app.get("/chef/stats/:email", verifyFirebaseToken, async (req, res) => {
+      if (req.user.email !== req.params.email) {
+        return res.status(403).send({ message: "Forbidden" });
+      }
+
+      const chef = await usersCollection.findOne({ email: req.params.email });
+      if (!chef || chef.role !== "chef") {
+        return res.status(403).send({ message: "Chef only" });
+      }
+
+      const chefMeals = await mealsCollection.countDocuments({
+        userEmail: req.params.email,
+      });
+      const pendingOrders = await ordersCollection.countDocuments({
+        chefId: chef.chefId,
+        orderStatus: "pending",
+      });
+      const completedOrders = await ordersCollection.countDocuments({
+        chefId: chef.chefId,
+        orderStatus: "delivered",
+      });
+      const totalOrders = await ordersCollection.countDocuments({
+        chefId: chef.chefId,
+      });
+
+      // Calculate total earnings from delivered/paid orders
+      const earningsAggregate = await ordersCollection
+        .aggregate([
+          {
+            $match: {
+              chefId: chef.chefId,
+              orderStatus: "delivered",
+              paymentStatus: "paid",
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: { $multiply: ["$price", "$quantity"] } },
+            },
+          },
+        ])
+        .toArray();
+
+      // Calculate average rating from meals
+      const mealRatings = await mealsCollection
+        .find({ userEmail: req.params.email, rating: { $exists: true } })
+        .toArray();
+
+      const avgRating =
+        mealRatings.length > 0
+          ? (
+              mealRatings.reduce((sum, meal) => sum + (meal.rating || 0), 0) /
+              mealRatings.length
+            ).toFixed(1)
+          : "N/A";
+
+      res.send({
+        totalMeals: chefMeals,
+        pendingOrders,
+        completedOrders,
+        totalOrders,
+        totalEarnings: earningsAggregate[0]?.total || 0,
+        averageRating: avgRating,
+      });
+    });
+
+    // User Stats
+    app.get("/user/stats/:email", verifyFirebaseToken, async (req, res) => {
+      if (req.user.email !== req.params.email) {
+        return res.status(403).send({ message: "Forbidden" });
+      }
+
+      const totalOrders = await ordersCollection.countDocuments({
+        userEmail: req.params.email,
+      });
+      const activeOrders = await ordersCollection.countDocuments({
+        userEmail: req.params.email,
+        orderStatus: {
+          $in: ["pending", "accepted", "preparing", "out_for_delivery"],
+        },
+      });
+      const completedOrders = await ordersCollection.countDocuments({
+        userEmail: req.params.email,
+        orderStatus: "delivered",
+      });
+      const favorites = await favoritesCollection.countDocuments({
+        userEmail: req.params.email,
+      });
+      const reviews = await reviewsCollection.countDocuments({
+        reviewerEmail: req.params.email,
+      });
+
+      // Calculate total spent
+      const spentAggregate = await ordersCollection
+        .aggregate([
+          {
+            $match: {
+              userEmail: req.params.email,
+              paymentStatus: "paid",
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: { $multiply: ["$price", "$quantity"] } },
+            },
+          },
+        ])
+        .toArray();
+
+      res.send({
+        totalOrders,
+        activeOrders,
+        completedOrders,
+        favorites,
+        reviews,
+        totalSpent: spentAggregate[0]?.total || 0,
       });
     });
 
@@ -416,7 +561,7 @@ async function run() {
         } catch (err) {
           res.status(500).send({ error: err.message });
         }
-      }
+      },
     );
 
     // GET reviews by user email (for My Reviews page)
@@ -466,7 +611,7 @@ async function run() {
 
       const result = await reviewsCollection.updateOne(
         { _id: new ObjectId(req.params.id) },
-        { $set: { rating, comment, date: new Date() } }
+        { $set: { rating, comment, date: new Date() } },
       );
 
       res.send(result);
@@ -503,7 +648,7 @@ async function run() {
 
       const result = await usersCollection.updateOne(
         { email },
-        { $set: { status: "fraud" } }
+        { $set: { status: "fraud" } },
       );
 
       res.send(result);
@@ -655,7 +800,7 @@ async function run() {
               mealRatings.length > 0
                 ? mealRatings.reduce(
                     (sum, meal) => sum + (meal.rating || 0),
-                    0
+                    0,
                   ) / mealRatings.length
                 : 0;
 
@@ -670,7 +815,7 @@ async function run() {
               avgRating: parseFloat(avgRating.toFixed(1)),
               createdAt: chef.createdAt,
             };
-          })
+          }),
         );
 
         // Filter featured chefs (4+ rating and at least 5 meals)
@@ -716,7 +861,7 @@ async function run() {
                 mealRatings.length > 0
                   ? mealRatings.reduce(
                       (sum, meal) => sum + (meal.rating || 0),
-                      0
+                      0,
                     ) / mealRatings.length
                   : 0;
 
@@ -725,7 +870,7 @@ async function run() {
                 mealCount,
                 avgRating: parseFloat(avgRating.toFixed(1)),
               };
-            })
+            }),
           );
 
           let featuredChefs = chefStats
